@@ -28,12 +28,15 @@
 #include "dutil.h"
 //#include "ctf_encoder.h" FIXME: disabled, probably its better to move to Oracle's libctf
 #include "btf_encoder.h"
+#include "probe_encoder.h"
 
 static struct btf_encoder *btf_encoder;
+static struct probe_encoder *probe_encoder;
 static char *detached_btf_filename;
 struct cus *cus;
 static bool btf_encode;
 static bool ctf_encode;
+static bool probe_encode;
 static bool sort_output;
 static bool need_resort;
 static bool first_obj_only;
@@ -1665,6 +1668,11 @@ static const struct argp_option pahole__options[] = {
 		.doc  = "Allow using all the BTF features supported by pahole."
 	},
 	{
+		.name = "probe_encode",
+		.key  = 'k',
+		.doc  = "Encode inline functions as Probes."
+	},
+	{
 		.name = "compile",
 		.key  = ARGP_compile,
 		.doc  = "Emit compilable types"
@@ -1832,6 +1840,11 @@ static error_t pahole__options_parser(int key, char *arg,
 							break;
 	case ARGP_btf_encode_detached:
 		  detached_btf_filename = arg; // fallthru
+	case 'k': probe_encode = 1;
+		  conf_load.get_addr_info = true;
+		  conf_load.ignore_labels	= true;
+		  conf_load.use_obstack		= true;
+			break;
 	case 'J': btf_encode = 1;
 		  conf_load.get_addr_info = true;
 		  conf_load.ignore_alignment_attr = true;
@@ -3139,6 +3152,7 @@ static bool print_enumeration_with_enumerator(struct cu *cu, const char *name)
 struct thread_data {
 	struct btf *btf;
 	struct btf_encoder *encoder;
+	struct probe_encoder *probe_encoder;
 };
 
 static int pahole_threads_prepare_reproducible_build(struct conf_load *conf, int nr_threads, void **thr_data)
@@ -3232,6 +3246,87 @@ static enum load_steal_kind pahole_stealer(struct cu *cu,
 	if (find_enumeration_with_enumerator &&
 	    print_enumeration_with_enumerator(cu, enumerator_name))
 		return LSK__DELETE; // Maybe we can find this in several CUs, so don't stop it
+
+	if (probe_encode) {
+		static pthread_mutex_t probe_lock = PTHREAD_MUTEX_INITIALIZER;
+		struct probe_encoder *encoder;
+
+		pthread_mutex_lock(&probe_lock);
+
+		if (!probe_encoder) {
+			/*
+			 * probe_encoder is the primary encoder.
+			 * And, it is used by the thread
+			 * create it.
+			 */
+			probe_encoder = probe_encoder__new(cu, detached_btf_filename,
+										 conf_load->base_btf, global_verbose, conf_load);
+			if (probe_encoder && thr_data) {
+				struct thread_data *thread = thr_data;
+
+				thread->probe_encoder = probe_encoder;
+			}
+		}
+
+		if (!probe_encoder) {
+			ret = LSK__STOP_LOADING;
+			goto out_probe;
+		}
+
+		// Reproducible builds don't have multiple btf_encoders, so we need to keep the lock until we encode BTF for this CU.
+		if (thr_data)
+			pthread_mutex_unlock(&probe_lock);
+
+		/*
+		 * thr_data keeps per-thread data for worker threads.  Each worker thread
+		 * has an encoder.  The main thread will merge the data collected by all
+		 * these encoders to btf_encoder.  However, the first thread reaching this
+		 * function creates btf_encoder and reuses it as its local encoder.  It
+		 * avoids copying the data collected by the first thread.
+		 */
+		if (thr_data) {
+			struct thread_data *thread = thr_data;
+
+			if (thread->probe_encoder == NULL) {
+				thread->probe_encoder = probe_encoder__new(cu, detached_btf_filename,
+															 NULL, global_verbose, conf_load);
+			}
+			encoder = thread->probe_encoder;
+		} else {
+			encoder = probe_encoder;
+		}
+
+		// Since we don't have yet a way to parallelize the BTF encoding, we
+		// need to ask the loader for the next CU that we can process, one
+		// that is loaded and is in order, if the next one isn't yet loaded,
+		// then return to let the DWARF loader thread to load the next one,
+		// eventually all will get processed, even if when all DWARF loading
+		// threads finish.
+		if (conf_load->reproducible_build) {
+			ret = LSK__KEEPIT; // we're not processing the cu passed to this
+					  // function, so keep it.
+			cu = cus__get_next_processable_cu(cus);
+			if (cu == NULL)
+				goto out_probe;
+		}
+
+		ret = probe_encoder__encode_cu(encoder, cu, conf_load);
+		if (ret < 0) {
+			fprintf(stderr, "Encountered error while encoding probe.\n");
+			exit(1);
+		}
+
+		if (conf_load->reproducible_build) {
+			ret = LSK__KEEPIT; // we're not processing the cu passed to this function, so keep it.
+			// Kinda equivalent to LSK__DELETE since we processed this, but we can't delete it
+			// as we stash references to entries in CUs for 'struct function' in btf_encoder__add_saved_funcs()
+			// and btf_encoder__save_func(), so we can't delete them here. - Alan Maguire
+		}
+out_probe:
+		if (!thr_data) // See comment about reproducibe_build above
+			pthread_mutex_unlock(&probe_lock);
+		return ret;
+	}
 
 	if (btf_encode) {
 		static pthread_mutex_t btf_lock = PTHREAD_MUTEX_INITIALIZER;
