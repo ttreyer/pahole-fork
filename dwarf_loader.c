@@ -2140,6 +2140,7 @@ static int die__process_inline_expansion(Dwarf_Die *die, struct lexblock *lexblo
 {
 	Dwarf_Die child;
 	struct tag *tag;
+	int param_idx = 0;
 
 	if (!dwarf_haschildren(die) || dwarf_child(die, &child) != 0)
 		return 0;
@@ -2179,6 +2180,7 @@ static int die__process_inline_expansion(Dwarf_Die *die, struct lexblock *lexblo
 			 *
 			 * cu__tag_not_handled(cu, die);
 			 */
+			tag = die__create_new_parameter(die, NULL, lexblock, cu, conf, param_idx++);
 			continue;
 		case DW_TAG_inlined_subroutine:
 			tag = die__create_new_inline_expansion(die, lexblock, cu, conf);

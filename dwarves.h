@@ -942,6 +942,7 @@ struct parameter {
 	uint8_t optimized:1;
 	uint8_t unexpected_reg:1;
 	uint8_t has_loc:1;
+	Dwarf_Op *loc;
 };
 
 static inline struct parameter *tag__parameter(const struct tag *tag)
