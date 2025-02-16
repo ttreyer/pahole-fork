@@ -33,6 +33,11 @@ struct probe_inline_expansion {
   struct inline_expansion *exp;
 };
 
+struct probe_inline_argument {
+  struct list_head node;
+  struct parameter *param;
+};
+
 struct probe_encoder {
   struct list_head node;
   struct list_head inline_expansions;
@@ -103,13 +108,21 @@ static void probe_encoder__write_probe(struct probe_encoder *encoder, struct pro
     write(encoder->fd, padding, padding_len);
 }
 
-static struct probe_inline_expansion *probe_encoder__add_inline_expansion(struct probe_encoder *encoder, struct inline_expansion *exp)
+static struct probe_inline_expansion *probe_encoder__add_inline_expansion(struct probe_encoder *encoder, struct inline_expansion *exp, struct function *alias)
 {
   struct probe_inline_expansion *probe_exp = zalloc(sizeof(*probe_exp));
 
   if (probe_exp) {
     probe_exp->exp = exp;
     list_add_tail(&probe_exp->node, &encoder->inline_expansions);
+
+    printf("%s %u %#zx: %u\n", function__name(alias), exp->ip.tag.type, exp->high_pc,
+           exp->ip.tag.tag);
+
+    struct parameter *parm = NULL;
+    list_for_each_entry(parm, &exp->parms, tag.node) {
+      printf("  param: %p %u %s\n", parm, parm->tag.type, parameter__name(parm));
+    }
   }
 
   return probe_exp;
@@ -159,31 +172,21 @@ int probe_encoder__encode_cu(struct probe_encoder *encoder, struct cu *cu, struc
     if (addr == 0)
       continue;
 
-    const char *name = function__name(func);
-    printf("%s @%#zx\n", name, addr);
-
     struct tag *tag = NULL;
     list_for_each_entry(tag, &func->lexblock.tags, node) {
-      if (tag->tag == DW_TAG_formal_parameter) {
-        struct parameter *param = tag__parameter(tag);
-        printf("  param: %s\n", parameter__name(param));
-      }
       if (tag->tag != DW_TAG_inlined_subroutine)
         continue;
 
       struct inline_expansion *exp = tag__inline_expansion(tag);
-      probe_encoder__add_inline_expansion(encoder, exp);
-      
-      struct probe p = {0};
-      p.address = exp->ip.addr;
-
-      p.provider = "";
       const struct tag *talias = cu__function(cu, exp->ip.tag.type);
       struct function *alias = tag__function(talias);
+      probe_encoder__add_inline_expansion(encoder, exp, alias);
+
+      struct probe p = {0};
+      p.address = exp->ip.addr;
+      p.provider = "";
       p.name = function__name(alias);
       p.arguments = "";
-
-      printf(" inlined: %s\n", p.name);
 
       probe_encoder__write_probe(encoder, &p);
     }
