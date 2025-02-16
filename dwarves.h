@@ -821,6 +821,8 @@ struct inline_expansion {
 	struct ip_tag	 ip;
 	size_t		 size;
 	uint64_t	 high_pc;
+	struct list_head parms;
+	uint16_t         nr_parms;
 };
 
 static inline struct inline_expansion *
@@ -954,6 +956,8 @@ static inline const char *parameter__name(const struct parameter *parm)
 {
 	return parm->name;
 }
+
+void inline_expansion__add_formal_parameter(struct inline_expansion *exp, struct parameter *parm);
 
 /* struct template_type_param - parameters to a template, stored in 'struct type'
  */

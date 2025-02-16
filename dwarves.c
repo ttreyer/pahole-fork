@@ -1578,6 +1578,12 @@ void lexblock__add_label(struct lexblock *block, struct label *label)
 	lexblock__add_tag(block, &label->ip.tag);
 }
 
+void inline_expansion__add_formal_parameter(struct inline_expansion *exp, struct parameter *parm)
+{
+	++exp->nr_parms;
+	list_add_tail(&parm->tag.node, &exp->parms);
+}
+
 static bool __class__has_flexible_array(struct class *class, const struct cu *cu)
 {
 	struct class_member *member = type__last_member(&class->type);
@@ -2149,6 +2155,10 @@ static int list__for_all_tags(struct list_head *list, struct cu *cu,
 				return 1;
 		} else if (pos->tag == DW_TAG_subroutine_type) {
 			if (list__for_all_tags(&tag__ftype(pos)->parms,
+					       cu, iterator, cookie))
+				return 1;
+		} else if (pos->tag == DW_TAG_inlined_subroutine) {
+			if (list__for_all_tags(&tag__inline_expansion(pos)->parms,
 					       cu, iterator, cookie))
 				return 1;
 		} else if (pos->tag == DW_TAG_lexical_block) {

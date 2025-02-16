@@ -1400,6 +1400,9 @@ static struct inline_expansion *inline_expansion__new(Dwarf_Die *die, struct cu 
 					exp->ip.addr = start;
 			}
 		}
+
+		INIT_LIST_HEAD(&exp->parms);
+		exp->nr_parms = 0;
 	}
 out:
 	return exp;
@@ -1793,6 +1796,7 @@ static struct tag *die__create_new_string_type(Dwarf_Die *die, struct cu *cu)
 
 static struct tag *die__create_new_parameter(Dwarf_Die *die,
 					     struct ftype *ftype,
+							 struct inline_expansion *iexp,
 					     struct lexblock *lexblock,
 					     struct cu *cu, struct conf_load *conf,
 					     int param_idx)
@@ -1808,6 +1812,8 @@ static struct tag *die__create_new_parameter(Dwarf_Die *die,
 			if (add_child_llvm_annotations(die, param_idx, conf, &(tag__function(&ftype->tag)->annots)))
 				return NULL;
 		}
+	} else if (iexp != NULL) {
+		inline_expansion__add_formal_parameter(iexp, parm);
 	} else {
 		/*
 		 * DW_TAG_formal_parameters on a non DW_TAG_subprogram nor
@@ -1884,7 +1890,7 @@ static struct tag *die__create_new_subroutine_type(Dwarf_Die *die,
 			tag__print_not_supported(die);
 			continue;
 		case DW_TAG_formal_parameter:
-			tag = die__create_new_parameter(die, ftype, NULL, cu, conf, -1);
+			tag = die__create_new_parameter(die, ftype, NULL, NULL, cu, conf, -1);
 			break;
 		case DW_TAG_unspecified_parameters:
 			ftype->unspec_parms = 1;
@@ -2136,7 +2142,7 @@ static struct tag *die__create_new_inline_expansion(Dwarf_Die *die,
 						    struct lexblock *lexblock,
 						    struct cu *cu, struct conf_load *conf);
 
-static int die__process_inline_expansion(Dwarf_Die *die, struct lexblock *lexblock, struct cu *cu, struct conf_load *conf)
+static int die__process_inline_expansion(Dwarf_Die *die, struct inline_expansion *exp, struct lexblock *lexblock, struct cu *cu, struct conf_load *conf)
 {
 	Dwarf_Die child;
 	struct tag *tag;
@@ -2180,7 +2186,7 @@ static int die__process_inline_expansion(Dwarf_Die *die, struct lexblock *lexblo
 			 *
 			 * cu__tag_not_handled(cu, die);
 			 */
-			tag = die__create_new_parameter(die, NULL, lexblock, cu, conf, param_idx++);
+			tag = die__create_new_parameter(die, NULL, exp, lexblock, cu, conf, param_idx++);
 			continue;
 		case DW_TAG_inlined_subroutine:
 			tag = die__create_new_inline_expansion(die, lexblock, cu, conf);
@@ -2232,7 +2238,7 @@ static struct tag *die__create_new_inline_expansion(Dwarf_Die *die,
 	if (exp == NULL)
 		return NULL;
 
-	if (die__process_inline_expansion(die, lexblock, cu, conf) != 0) {
+	if (die__process_inline_expansion(die, exp, lexblock, cu, conf) != 0) {
 		tag__free(&exp->ip.tag, cu);
 		return NULL;
 	}
@@ -2317,7 +2323,7 @@ static int die__process_function(Dwarf_Die *die, struct ftype *ftype,
 			continue;
 		}
 		case DW_TAG_formal_parameter:
-			tag = die__create_new_parameter(die, ftype, lexblock, cu, conf, param_idx++);
+			tag = die__create_new_parameter(die, ftype, NULL, lexblock, cu, conf, param_idx++);
 			break;
 		case DW_TAG_variable:
 			tag = die__create_new_variable(die, cu, conf, 0);
