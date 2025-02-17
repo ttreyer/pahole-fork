@@ -145,12 +145,23 @@ int __tag__has_type_loop(const struct tag *tag, const struct tag *type,
 	return 0;
 }
 
+static void inline_expansion__delete(struct inline_expansion *exp, struct cu *cu)
+{
+	struct tag *param, *n;
+	list_for_each_entry_safe_reverse(param, n, &exp->parms, node) {
+		list_del_init(&param->node);
+		tag__delete(param, cu);
+	}
+}
+
 static void lexblock__delete_tags(struct tag *tag, struct cu *cu)
 {
 	struct lexblock *block = tag__lexblock(tag);
 	struct tag *pos, *n;
 
 	list_for_each_entry_safe_reverse(pos, n, &block->tags, node) {
+		if (pos->tag == DW_TAG_inlined_subroutine)
+			inline_expansion__delete(tag__inline_expansion(pos), cu);
 		list_del_init(&pos->node);
 		tag__delete(pos, cu);
 	}
