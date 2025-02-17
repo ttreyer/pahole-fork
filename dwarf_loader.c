@@ -2615,59 +2615,64 @@ static void __tag__print_abstract_origin_not_found(struct tag *tag,
 #define tag__print_abstract_origin_not_found(tag) \
 	__tag__print_abstract_origin_not_found(tag, __func__, __LINE__)
 
+static void parameter__recode_dwarf_type(struct parameter *param, struct cu *cu)
+{
+	struct dwarf_cu *dcu = cu->priv;
+	struct dwarf_tag *dpos = tag__dwarf(&param->tag);
+	struct parameter *opos;
+	struct dwarf_tag *dtype;
+
+	if (dpos->type == 0) {
+		if (dpos->abstract_origin == 0) {
+			/* Function without parameters */
+			param->tag.type = 0;
+			return;
+		}
+		dtype = dwarf_cu__find_tag_by_ref(dcu, dpos, abstract_origin);
+		if (dtype == NULL) {
+			tag__print_abstract_origin_not_found(&param->tag);
+			return;
+		}
+		opos = tag__parameter(dtag__tag(dtype));
+		param->name = opos->name;
+		param->tag.type = dtag__tag(dtype)->type;
+		/* share location information between parameter and
+			* abstract origin; if neither have location, we will
+			* mark the parameter as optimized out.  Also share
+			* info regarding unexpected register use for
+			* parameters.
+			*/
+		if (param->has_loc)
+			opos->has_loc = param->has_loc;
+
+		if (param->optimized)
+			opos->optimized = param->optimized;
+		if (param->unexpected_reg)
+			opos->unexpected_reg = param->unexpected_reg;
+		return;
+	}
+
+	dtype = dwarf_cu__find_type_by_ref(dcu, dpos, type);
+	if (dtype == NULL) {
+		tag__print_type_not_found(&param->tag);
+		return;
+	}
+	param->tag.type = dtype->small_id;
+}
+
 static void ftype__recode_dwarf_types(struct tag *tag, struct cu *cu)
 {
 	struct parameter *pos;
-	struct dwarf_cu *dcu = cu->priv;
 	struct ftype *type = tag__ftype(tag);
 
 	ftype__for_each_parameter(type, pos) {
-		struct dwarf_tag *dpos = tag__dwarf(&pos->tag);
-		struct parameter *opos;
-		struct dwarf_tag *dtype;
-
-		if (dpos->type == 0) {
-			if (dpos->abstract_origin == 0) {
-				/* Function without parameters */
-				pos->tag.type = 0;
-				continue;
-			}
-			dtype = dwarf_cu__find_tag_by_ref(dcu, dpos, abstract_origin);
-			if (dtype == NULL) {
-				tag__print_abstract_origin_not_found(&pos->tag);
-				continue;
-			}
-			opos = tag__parameter(dtag__tag(dtype));
-			pos->name = opos->name;
-			pos->tag.type = dtag__tag(dtype)->type;
-			/* share location information between parameter and
-			 * abstract origin; if neither have location, we will
-			 * mark the parameter as optimized out.  Also share
-			 * info regarding unexpected register use for
-			 * parameters.
-			 */
-			if (pos->has_loc)
-				opos->has_loc = pos->has_loc;
-
-			if (pos->optimized)
-				opos->optimized = pos->optimized;
-			if (pos->unexpected_reg)
-				opos->unexpected_reg = pos->unexpected_reg;
-			continue;
-		}
-
-		dtype = dwarf_cu__find_type_by_ref(dcu, dpos, type);
-		if (dtype == NULL) {
-			tag__print_type_not_found(&pos->tag);
-			continue;
-		}
-		pos->tag.type = dtype->small_id;
+		parameter__recode_dwarf_type(pos, cu);
 	}
 }
 
 static void lexblock__recode_dwarf_types(struct lexblock *tag, struct cu *cu)
 {
-	struct tag *pos;
+	struct tag *pos, *param;
 	struct dwarf_cu *dcu = cu->priv;
 
 	list_for_each_entry(pos, &tag->tags, node) {
@@ -2691,6 +2696,8 @@ static void lexblock__recode_dwarf_types(struct lexblock *tag, struct cu *cu)
 				continue;
 			}
 			ftype__recode_dwarf_types(dtag__tag(dtype), cu);
+			list_for_each_entry(param, &tag__inline_expansion(pos)->parms, node)
+				parameter__recode_dwarf_type(tag__parameter(param), cu);
 			continue;
 
 		case DW_TAG_formal_parameter:
