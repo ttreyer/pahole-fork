@@ -811,6 +811,8 @@ struct inline_expansion {
 	struct ip_tag	 ip;
 	size_t		 size;
 	uint64_t	 high_pc;
+	struct list_head parameters;
+	uint16_t   nr_parameters;
 };
 
 static inline struct inline_expansion *
@@ -818,6 +820,9 @@ static inline struct inline_expansion *
 {
 	return (struct inline_expansion *)tag;
 }
+
+struct parameter;
+void inline_expansion__add_parameter(struct inline_expansion *exp, struct parameter *param);
 
 struct label {
 	struct ip_tag	 ip;
@@ -929,6 +934,7 @@ size_t lexblock__fprintf(const struct lexblock *lexblock, const struct cu *cu,
 struct parameter {
 	struct tag tag;
 	const char *name;
+	struct location location;
 	uint8_t optimized:1;
 	uint8_t unexpected_reg:1;
 	uint8_t has_loc:1;

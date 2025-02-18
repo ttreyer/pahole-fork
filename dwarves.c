@@ -203,6 +203,22 @@ void formal_parameter_pack__delete(struct formal_parameter_pack *pack, struct cu
 	cu__tag_free(cu, &pack->tag);
 }
 
+static void parameter__delete(struct parameter *parm, struct cu *cu);
+
+static void inline_expansion__delete(struct inline_expansion *exp, struct cu *cu)
+{
+	struct tag *param, *n;
+
+	if (exp == NULL)
+		return;
+
+	list_for_each_entry_safe_reverse(param, n, &exp->parameters, node) {
+		list_del_init(&param->node);
+		parameter__delete(tag__parameter(param), cu);
+	}
+}
+
+
 void tag__delete(struct tag *tag, struct cu *cu)
 {
 	if (tag == NULL)
@@ -225,6 +241,8 @@ void tag__delete(struct tag *tag, struct cu *cu)
 		ftype__delete(tag__ftype(tag), cu);		break;
 	case DW_TAG_subprogram:
 		function__delete(tag__function(tag), cu); break;
+	case DW_TAG_inlined_subroutine:
+		inline_expansion__delete(tag__inline_expansion(tag), cu); break;
 	case DW_TAG_lexical_block:
 		lexblock__delete(tag__lexblock(tag), cu); break;
 	case DW_TAG_GNU_template_parameter_pack:
@@ -1504,6 +1522,12 @@ void ftype__add_template_value_param(struct ftype *ftype, struct template_value_
 	list_add_tail(&param->tag.node, &ftype->template_value_params);
 }
 
+void inline_expansion__add_parameter(struct inline_expansion *exp, struct parameter *param)
+{
+	++exp->nr_parameters;
+	list_add_tail(&param->tag.node, &exp->parameters);
+}
+
 void template_parameter_pack__add(struct template_parameter_pack *pack, struct template_type_param *param)
 {
 	list_add_tail(&param->tag.node, &pack->params);
@@ -2114,6 +2138,10 @@ static int list__for_all_tags(struct list_head *list, struct cu *cu,
 				return 1;
 		} else if (pos->tag == DW_TAG_lexical_block) {
 			if (list__for_all_tags(&tag__lexblock(pos)->tags,
+					       cu, iterator, cookie))
+				return 1;
+		} else if (pos->tag == DW_TAG_inlined_subroutine) {
+			if (list__for_all_tags(&tag__inline_expansion(pos)->parameters,
 					       cu, iterator, cookie))
 				return 1;
 		}
