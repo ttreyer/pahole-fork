@@ -109,7 +109,8 @@ endif()
 
 set(dwarves_LIB_SRCS dwarves.c dwarves_fprintf.c gobuffer.c
 		     ctf_loader.c libctf.c btf_encoder.c btf_loader.c
-		     dwarf_loader.c dutil.c elf_symtab.c rbtree.c)
+		     inline_encoder.c dwarf_loader.c dutil.c
+		     elf_symtab.c rbtree.c)
 if (NOT LIBBPF_FOUND)
 	list(APPEND dwarves_LIB_SRCS $<TARGET_OBJECTS:bpf>)
 endif()
