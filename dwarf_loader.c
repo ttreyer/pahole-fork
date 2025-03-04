@@ -1315,6 +1315,8 @@ static struct parameter *parameter__new(Dwarf_Die *die, struct cu *cu,
 				parm->unexpected_reg = 1;
 		} else if (has_const_value) {
 			parm->optimized = 1;
+			parm->location.expr = NULL;
+			parm->location.exprlen = attr_numeric(die, DW_AT_const_value);
 		}
 	}
 
