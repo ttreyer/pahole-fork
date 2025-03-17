@@ -31,7 +31,7 @@ enum loc_type {
 	LOC_UNSIGNED_CONST_4,
 	LOC_UNSIGNED_CONST_8,
 	LOC_REGISTER,
-};
+} __attribute__((packed));
 
 struct loc {
 	enum loc_type type;
@@ -161,6 +161,27 @@ static struct loc *loc__make_register(uint8_t reg, int64_t offset)
 	return new_loc;
 }
 
+static struct loc *loc__make_eoe(void)
+{
+	struct loc *new_loc = zalloc(sizeof(*new_loc));
+	if (new_loc == NULL)
+		return NULL;
+	new_loc->type = LOC_END_OF_EXPR;
+	new_loc->size = sizeof(*new_loc);
+	return new_loc;
+}
+
+static uint32_t expr__size(struct loc *expr[16])
+{
+	uint32_t size = 0;
+	for (size_t i = 0; i < 16; ++i) {
+		if (expr[i] == NULL)
+			break;
+		size += expr[i]->size;
+	}
+	return size;
+}
+
 static int inline_encoder__encode_location(struct inline_encoder *encoder, struct location *loc, struct loc *expr[16])
 {
 	if (loc->expr == NULL && loc->exprlen == 0)
@@ -216,6 +237,7 @@ static int inline_encoder__encode_location(struct inline_encoder *encoder, struc
 			goto out_err;
 	}
 
+	expr[expr_i++] = loc__make_eoe();
 	return 0;
 
 out_err:
@@ -319,27 +341,57 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 		fprintf(stderr, "Failed to open /tmp/inline_expansions.btf: %s\n", strerror(errno));
 		return -1;
 	}
-	uint32_t inline_info_size = 0;
-	struct inline_instance *exp;
-	list_for_each_entry(exp, &encoder->inline_instances, node) {
-		inline_info_size += inline_instance__sizeof(exp->param_count) - sizeof(struct list_head);
-	}
 	struct inline_encoder__header header = {
 		.magic = 0xeb9f,
 		.version = 1,
 		.flags = 0,
 		.header_size = sizeof(header),
 		.inline_info_offset = sizeof(struct inline_encoder__header),
-		.inline_info_size = inline_info_size,
+		.inline_info_size = 0,
 		.location_offset = 0,
-		.location_size = 0,
+		.location_size = 2,
 	};
 	write(fd, &header, header.header_size);
 
+	struct inline_instance *exp;
 	list_for_each_entry(exp, &encoder->inline_instances, node) {
 		const void *data = exp;
-		write(fd, data + offsetof(struct inline_instance, insn_offset), inline_instance__sizeof(exp->param_count) - offsetof(struct inline_instance, insn_offset));
+		header.inline_info_size += write(
+			fd,
+			data + offsetof(struct inline_instance, insn_offset),
+			inline_instance__sizeof(0)
+				- offsetof(struct inline_instance, insn_offset)
+				- 2); // Skip padding at the end of the struct
+		for (uint16_t i = 0; i < exp->param_count; ++i) {
+			struct inline_parameter *param = &exp->parameters[i];
+			if (param->location[0] == NULL) {
+				uint32_t zero = 0;
+				header.inline_info_size += write(fd, &zero, sizeof(zero));
+			} else {
+				header.inline_info_size += write(fd, &header.location_size, sizeof(header.location_size));
+				header.location_size += expr__size(param->location);
+			}
+		}
 	}
+	struct loc end_of_expr = {
+		.type = LOC_END_OF_EXPR,
+		.size = sizeof(end_of_expr),
+	};
+	write(fd, &end_of_expr, sizeof(end_of_expr));
+	list_for_each_entry(exp, &encoder->inline_instances, node) {
+		for (uint16_t i = 0; i < exp->param_count; ++i) {
+			struct inline_parameter *param = &exp->parameters[i];
+			for (size_t j = 0; j < 16; ++j) {
+				struct loc *op = param->location[j];
+				if (op == NULL)
+					break;
+				write(fd, op, op->size);
+			}
+		}
+	}
+	header.location_offset = header.inline_info_offset + header.inline_info_size;
+	lseek(fd, 0, SEEK_SET);
+	write(fd, &header, header.header_size);
 	close(fd);
 
 	return 0;
