@@ -3697,17 +3697,22 @@ try_sole_arg_as_class_names:
 
 	if (btf_encode && btf_encoder) { // maybe all CUs were filtered out and thus we don't have an encoder?
 		err = btf_encoder__encode(btf_encoder, &conf_load);
-		btf_encoder__delete(btf_encoder);
 		if (err) {
+			btf_encoder__delete(btf_encoder);
 			fputs("Failed to encode BTF\n", stderr);
 			goto out_cus_delete;
 		}
-		err = inline_encoder__encode(inline_encoder, &conf_load);
-		inline_encoder__delete(inline_encoder);
-		if (err) {
-			fputs("Failed to encode inline information\n", stderr);
-			goto out_cus_delete;
+		if (inline_encode && inline_encoder) {
+			inline_encoder__set_btf(inline_encoder, btf_encoder__btf(btf_encoder));
+			err = inline_encoder__encode(inline_encoder, &conf_load);
+			inline_encoder__delete(inline_encoder);
+			if (err) {
+				btf_encoder__delete(btf_encoder);
+				fputs("Failed to encode inline information\n", stderr);
+				goto out_cus_delete;
+			}
 		}
+		btf_encoder__delete(btf_encoder);
 	}
 out_ok:
 	if (stats_formatter != NULL)

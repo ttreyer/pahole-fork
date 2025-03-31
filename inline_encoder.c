@@ -8,6 +8,7 @@
   Copyright (C) Arnaldo Carvalho de Melo <acme@redhat.com>
   Copyright (C) Red Hat Inc
  */
+#include <bpf/btf.h>
 
 #include "dutil.h"
 #include "dwarves.h"
@@ -45,6 +46,7 @@ struct inline_parameter {
 struct inline_instance {
 	struct list_head node;
 	uint64_t die_offset;
+	const char *name;
 	uint64_t insn_offset;
 	type_id_t type_id;
 	uint16_t param_count;
@@ -56,6 +58,7 @@ struct inline_encoder {
 	struct cu *cu;
 	const char *source_filename;
 	const char *filename;
+	size_t nonames;
 
 	struct list_head inline_instances;
 };
@@ -86,6 +89,7 @@ struct inline_encoder *inline_encoder__new(struct cu *cu, const char *detached_f
 		encoder->source_filename = strdup(cu->filename);
 		encoder->filename = strdup(detached_filename ?: cu->filename);
 		encoder->btf = base_btf;
+		encoder->nonames = 0;
 
 		INIT_LIST_HEAD(&encoder->inline_instances);
 	}
@@ -265,14 +269,20 @@ static inline uint64_t die_offset(const struct tag *tag)
 
 static int inline_encoder__save_inline_expansion(struct inline_encoder *encoder, struct inline_expansion *exp)
 {
+	if (exp->name == NULL)
+		return 0;
+
 	struct inline_instance *instance = zalloc(inline_instance__sizeof(exp->nr_parameters));
 	if (instance == NULL)
 		return -ENOMEM;
 
 	instance->die_offset = die_offset((struct tag *)exp);
+	instance->name = exp->name;
 	instance->insn_offset = exp->ip.addr;
-	instance->type_id = exp->ip.tag.type;
+	instance->type_id = -1;
 	instance->param_count = exp->nr_parameters;
+	encoder->nonames += exp->name ? 1 : 0;
+	// printf("inline instance for %u (%s): %lx %lx\n", instance->type_id, exp->name, instance->die_offset, instance->insn_offset);
 
 	uint32_t param_index = 0;
 	struct parameter *param = NULL;
@@ -336,6 +346,7 @@ out:
 
 int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *conf_load)
 {
+	printf("nonames = %zu\n", encoder->nonames);
 	int fd = open("/tmp/inline_expansions.btf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0) {
 		fprintf(stderr, "Failed to open /tmp/inline_expansions.btf: %s\n", strerror(errno));
@@ -355,6 +366,13 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 
 	struct inline_instance *exp;
 	list_for_each_entry(exp, &encoder->inline_instances, node) {
+		int type_id = btf__find_by_name_kind(encoder->btf, exp->name, BTF_KIND_FUNC);
+		if (type_id < 0) {
+			// printf("Failed to find type id for %s\n", exp->name);
+			continue;
+		}
+		printf("Found type id for %s: %d\n", exp->name, type_id);
+		exp->type_id = type_id;
 		const void *data = exp;
 		header.inline_info_size += write(
 			fd,
@@ -379,6 +397,8 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 	};
 	write(fd, &end_of_expr, sizeof(end_of_expr));
 	list_for_each_entry(exp, &encoder->inline_instances, node) {
+		if (exp->type_id == -1)
+			continue;
 		for (uint16_t i = 0; i < exp->param_count; ++i) {
 			struct inline_parameter *param = &exp->parameters[i];
 			for (size_t j = 0; j < 16; ++j) {
@@ -395,4 +415,9 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 	close(fd);
 
 	return 0;
+}
+
+void inline_encoder__set_btf(struct inline_encoder *encoder, struct btf *btf)
+{
+	encoder->btf = btf;
 }

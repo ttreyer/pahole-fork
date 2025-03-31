@@ -1377,6 +1377,15 @@ static struct inline_expansion *inline_expansion__new(Dwarf_Die *die, struct cu 
 		dtag->decl_file = attr_string(die, DW_AT_call_file, conf);
 		dtag->decl_line = attr_numeric(die, DW_AT_call_line);
 		dwarf_tag__set_attr_type(dtag, type, die, DW_AT_abstract_origin);
+
+    Dwarf_Attribute attr;
+		if (dwarf_attr(die, DW_AT_abstract_origin, &attr)) {
+			Dwarf_Die orig_die;
+			if (dwarf_formref_die(&attr, &orig_die)) {
+				exp->name = attr_string(&orig_die, DW_AT_name, conf);
+			}
+		}
+
 		exp->ip.addr = 0;
 		exp->high_pc = 0;
 		exp->nr_parameters = 0;
@@ -2689,12 +2698,13 @@ static void inline_expansion__recode_dwarf_types(struct tag *tag, struct cu *cu)
 			tag__print_abstract_origin_not_found(tag);
 		return;
 	}
-	ftype__recode_dwarf_types(dtag__tag(ftype), cu);
+	// ftype__recode_dwarf_types(dtag__tag(ftype), cu);
 
 	struct tag *pos;
 	struct inline_expansion *exp = tag__inline_expansion(tag);
 	list_for_each_entry(pos, &exp->parameters, node)
 		parameter__recode_dwarf_type(tag__parameter(pos), cu);
+	exp->ip.tag.type = ftype->id;
 }
 
 static void lexblock__recode_dwarf_types(struct lexblock *tag, struct cu *cu)
@@ -2897,6 +2907,7 @@ static int tag__recode_dwarf_type(struct tag *tag, struct cu *cu)
 	   The others also point to routines, so are in tags_table */
 	case DW_TAG_inlined_subroutine:
 		inline_expansion__recode_dwarf_types(tag, cu);
+		return 0;
 		/* Fall thru */
 	case DW_TAG_imported_module:
 		dtype = dwarf_cu__find_tag_by_ref(cu->priv, dtag, type);

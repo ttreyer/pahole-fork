@@ -2682,3 +2682,8 @@ out:
 	encoder->cu = NULL;
 	return err;
 }
+
+struct btf *btf_encoder__btf(struct btf_encoder *encoder)
+{
+	return encoder->btf;
+}

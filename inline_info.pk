@@ -34,6 +34,10 @@ type II_Header = struct {
   offset<uint<32>, B> inline_info_size;
   offset<uint<32>, B> location_offset;
   offset<uint<32>, B> location_size;
-  II_inline_instance[inline_info_size] inline_instances @ inline_info_offset;
-  II_location_op[location_size] locations @ location_offset;
+};
+
+type II = struct {
+  II_Header hdr;
+  II_inline_instance[hdr.inline_info_size] inline_instances @ hdr.inline_info_offset;
+  II_location_op[hdr.location_size] locations @ hdr.location_offset;
 };

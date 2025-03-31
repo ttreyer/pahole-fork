@@ -20,4 +20,6 @@ void inline_encoder__delete(struct inline_encoder *encoder);
 int inline_encoder__encode_cu(struct inline_encoder *encoder, struct cu *cu, struct conf_load *conf_load);
 int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *conf_load);
 
+void inline_encoder__set_btf(struct inline_encoder *encoder, struct btf *btf);
+
 #endif /* _INLINE_ENCODER_H_ */
