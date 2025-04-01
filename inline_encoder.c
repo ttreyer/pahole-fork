@@ -15,6 +15,7 @@
 #include "inline_encoder.h"
 #include "list.h"
 
+#include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdlib.h>
@@ -58,7 +59,7 @@ struct inline_encoder {
 	struct cu *cu;
 	const char *source_filename;
 	const char *filename;
-	size_t nonames;
+	size_t inline_instance_cnt;
 
 	struct list_head inline_instances;
 };
@@ -89,7 +90,7 @@ struct inline_encoder *inline_encoder__new(struct cu *cu, const char *detached_f
 		encoder->source_filename = strdup(cu->filename);
 		encoder->filename = strdup(detached_filename ?: cu->filename);
 		encoder->btf = base_btf;
-		encoder->nonames = 0;
+		encoder->inline_instance_cnt = 0;
 
 		INIT_LIST_HEAD(&encoder->inline_instances);
 	}
@@ -281,7 +282,6 @@ static int inline_encoder__save_inline_expansion(struct inline_encoder *encoder,
 	instance->insn_offset = exp->ip.addr;
 	instance->type_id = -1;
 	instance->param_count = exp->nr_parameters;
-	encoder->nonames += exp->name ? 1 : 0;
 	// printf("inline instance for %u (%s): %lx %lx\n", instance->type_id, exp->name, instance->die_offset, instance->insn_offset);
 
 	uint32_t param_index = 0;
@@ -292,6 +292,7 @@ static int inline_encoder__save_inline_expansion(struct inline_encoder *encoder,
 
 	INIT_LIST_HEAD(&instance->node);
 	list_add_tail(&instance->node, &encoder->inline_instances);
+	encoder->inline_instance_cnt++;
 
 	return 0;
 }
@@ -344,9 +345,36 @@ out:
 	return err;
 }
 
+struct node_type_id {
+	const char *name;
+	type_id_t type_id;
+};
+
+static int cmpstrp(const void *left, const void *right)
+{
+	struct node_type_id *left_node = (struct node_type_id*)left;
+	struct node_type_id *right_node = (struct node_type_id*)right;
+	return strcmp(left_node->name, right_node->name);
+}
+
+static struct node_type_id *inline_encoder__build_type_id_cache(struct inline_encoder *encoder)
+{
+	struct node_type_id *exps = (struct node_type_id*)malloc(encoder->inline_instance_cnt * sizeof(struct node_type_id));
+
+	size_t exp_id = 0;
+	struct inline_instance *exp;
+	list_for_each_entry(exp, &encoder->inline_instances, node) {
+		exps[exp_id++] = (struct node_type_id){exp->name, 0};
+	}
+
+	qsort(exps, encoder->inline_instance_cnt, sizeof(struct node_type_id), cmpstrp);
+
+	return exps;
+}
+
 int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *conf_load)
 {
-	printf("nonames = %zu\n", encoder->nonames);
+	printf("inline instance count = %zu\n", encoder->inline_instance_cnt);
 	int fd = open("/tmp/inline_expansions.btf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
 	if (fd < 0) {
 		fprintf(stderr, "Failed to open /tmp/inline_expansions.btf: %s\n", strerror(errno));
@@ -364,15 +392,26 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 	};
 	write(fd, &header, header.header_size);
 
+	struct node_type_id *type_id_cache = inline_encoder__build_type_id_cache(encoder);
+
 	struct inline_instance *exp;
 	list_for_each_entry(exp, &encoder->inline_instances, node) {
-		int type_id = btf__find_by_name_kind(encoder->btf, exp->name, BTF_KIND_FUNC);
-		if (type_id < 0) {
-			// printf("Failed to find type id for %s\n", exp->name);
-			continue;
+		struct node_type_id lookup_key = { exp->name, 0 };
+		struct node_type_id *found = bsearch(&lookup_key, type_id_cache, encoder->inline_instance_cnt, sizeof(lookup_key), cmpstrp);
+		assert(found != NULL);
+		if (found->type_id == 0) {
+			int type_id = btf__find_by_name_kind(encoder->btf, exp->name, BTF_KIND_FUNC);
+			if (type_id < 0) {
+				// printf("Failed to find type id for %s\n", exp->name);
+				found->type_id = -1;
+			} else {
+				printf("Found type id for %s: %d\n", exp->name, type_id);
+				found->type_id = type_id;
+			}
 		}
-		printf("Found type id for %s: %d\n", exp->name, type_id);
-		exp->type_id = type_id;
+		exp->type_id = found->type_id;
+		if (exp->type_id == -1) continue;
+
 		const void *data = exp;
 		header.inline_info_size += write(
 			fd,
@@ -391,6 +430,9 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 			}
 		}
 	}
+
+	free(type_id_cache);
+
 	struct loc end_of_expr = {
 		.type = LOC_END_OF_EXPR,
 		.size = sizeof(end_of_expr),
