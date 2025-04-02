@@ -18,6 +18,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <linux/limits.h>
 #include <stdlib.h>
 #include <unistd.h>
 #include <pthread.h>
@@ -372,14 +373,16 @@ static struct node_type_id *inline_encoder__build_type_id_cache(struct inline_en
 	return exps;
 }
 
-int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *conf_load)
+static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const char *filename)
 {
-	printf("inline instance count = %zu\n", encoder->inline_instance_cnt);
-	int fd = open("/tmp/inline_expansions.btf", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-	if (fd < 0) {
-		fprintf(stderr, "Failed to open /tmp/inline_expansions.btf: %s\n", strerror(errno));
-		return -1;
+	int err = -1;
+
+	int fd = creat(filename, S_IRUSR | S_IWUSR);
+	if (fd == -1) {
+		fprintf(stderr, "%s open(%s) failed!\n", __func__, filename);
+		goto out;
 	}
+
 	struct inline_encoder__header header = {
 		.magic = 0xeb9f,
 		.version = 1,
@@ -401,13 +404,7 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 		assert(found != NULL);
 		if (found->type_id == 0) {
 			int type_id = btf__find_by_name_kind(encoder->btf, exp->name, BTF_KIND_FUNC);
-			if (type_id < 0) {
-				// printf("Failed to find type id for %s\n", exp->name);
-				found->type_id = -1;
-			} else {
-				printf("Found type id for %s: %d\n", exp->name, type_id);
-				found->type_id = type_id;
-			}
+			found->type_id = (type_id < 0) ? -1 : type_id;
 		}
 		exp->type_id = found->type_id;
 		if (exp->type_id == -1) continue;
@@ -454,9 +451,43 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 	header.location_offset = header.inline_info_offset + header.inline_info_size;
 	lseek(fd, 0, SEEK_SET);
 	write(fd, &header, header.header_size);
-	close(fd);
 
+	close(fd);
 	return 0;
+
+out:
+	if (fd != - 1)
+		close(fd);
+	unlink(filename);
+	return err;
+}
+
+int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *conf_load)
+{
+	char tmp_fn[PATH_MAX];
+	snprintf(tmp_fn, sizeof(tmp_fn), "%s.btf_inline", encoder->filename);
+
+	int err = inline_encoder__write_raw_file(encoder, tmp_fn);
+	if (err) return err;
+
+	const char *llvm_objcopy = getenv("LLVM_OBJCOPY");
+	if (!llvm_objcopy)
+		llvm_objcopy = "llvm-objcopy";
+
+	char cmd[PATH_MAX * 2];
+	snprintf(cmd, sizeof(cmd), "%s --add-section .BTF_inline=%s %s",
+		 llvm_objcopy, tmp_fn, encoder->filename);
+	if (system(cmd)) {
+		fprintf(stderr, "%s: failed to add .BTF_inline section '%s': %d!\n",
+				__func__, tmp_fn, errno);
+		err = -1;
+		goto unlink;
+	}
+
+	err = 0;
+unlink:
+	unlink(tmp_fn);
+	return err;
 }
 
 void inline_encoder__set_btf(struct inline_encoder *encoder, struct btf *btf)
