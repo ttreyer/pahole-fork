@@ -1,3 +1,6 @@
+#!/usr/bin/poke -L
+!#
+
 type II_location_op = struct {
   uint<8> ty;
   offset<uint<8>, B> size;
@@ -41,3 +44,12 @@ type II = struct {
   II_inline_instance[hdr.inline_info_size] inline_instances @ hdr.inline_info_offset;
   II_location_op[hdr.location_size] locations @ hdr.location_offset;
 };
+
+if (!poke_interactive_p) {
+  var inline_file = open("/tmp/inline_expansions.btf", IOS_M_RDONLY);
+  var inline_info = II @ inline_file : 0#B;
+
+  for (exp in inline_info.inline_instances) {
+    printf ("{low_pc => '0x%u64x',type_id => %u32d}\n", exp.insn_offset, exp.type_id);
+  }
+}
