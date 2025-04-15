@@ -1297,6 +1297,8 @@ static struct parameter *parameter__new(Dwarf_Die *die, struct cu *cu,
 		parm->has_loc = dwarf_attr(die, DW_AT_location, &attr) != NULL;
 
 		if (parm->has_loc) {
+			attr_location(die, &parm->location.expr, &parm->location.exprlen);
+
 			int expected_reg = cu->register_params[param_idx];
 			int actual_reg = parameter__reg(&attr, expected_reg);
 
@@ -1312,6 +1314,8 @@ static struct parameter *parameter__new(Dwarf_Die *die, struct cu *cu,
 				parm->unexpected_reg = 1;
 		} else if (has_const_value) {
 			parm->optimized = 1;
+			parm->location.expr = NULL;
+			parm->location.exprlen = attr_numeric(die, DW_AT_const_value);
 		}
 	}
 
@@ -1374,6 +1378,8 @@ static struct inline_expansion *inline_expansion__new(Dwarf_Die *die, struct cu 
 		dwarf_tag__set_attr_type(dtag, type, die, DW_AT_abstract_origin);
 		exp->ip.addr = 0;
 		exp->high_pc = 0;
+		exp->nr_parms = 0;
+		INIT_LIST_HEAD(&exp->parms);
 
 		if (!cu->has_addr_info)
 			goto out;
@@ -1794,6 +1800,7 @@ static struct tag *die__create_new_string_type(Dwarf_Die *die, struct cu *cu)
 static struct tag *die__create_new_parameter(Dwarf_Die *die,
 					     struct ftype *ftype,
 					     struct lexblock *lexblock,
+					     struct inline_expansion *exp,
 					     struct cu *cu, struct conf_load *conf,
 					     int param_idx)
 {
@@ -1808,15 +1815,16 @@ static struct tag *die__create_new_parameter(Dwarf_Die *die,
 			if (add_child_llvm_annotations(die, param_idx, conf, &(tag__function(&ftype->tag)->annots)))
 				return NULL;
 		}
+	} else if (exp != NULL) {
+		/*
+		 * Inline expansion stores the parameters in a list to emit
+		 * .BTF_inline parameter location.
+		 */
+		inline_expansion__add_parameter(exp, parm);
 	} else {
 		/*
-		 * DW_TAG_formal_parameters on a non DW_TAG_subprogram nor
-		 * DW_TAG_subroutine_type tag happens sometimes, likely due to
-		 * compiler optimizing away a inline expansion (at least this
-		 * was observed in some cases, such as in the Linux kernel
-		 * current_kernel_time function circa 2.6.20-rc5), keep it in
-		 * the lexblock tag list because it can be referenced as an
-		 * DW_AT_abstract_origin in another DW_TAG_formal_parameter.
+		 * Keep it in the lexblock tag list because it can be referenced
+		 * as an DW_AT_abstract_origin in another DW_TAG_formal_parameter.
 		*/
 		lexblock__add_tag(lexblock, &parm->tag);
 	}
@@ -1884,7 +1892,7 @@ static struct tag *die__create_new_subroutine_type(Dwarf_Die *die,
 			tag__print_not_supported(die);
 			continue;
 		case DW_TAG_formal_parameter:
-			tag = die__create_new_parameter(die, ftype, NULL, cu, conf, -1);
+			tag = die__create_new_parameter(die, ftype, NULL, NULL, cu, conf, -1);
 			break;
 		case DW_TAG_unspecified_parameters:
 			ftype->unspec_parms = 1;
@@ -2136,10 +2144,13 @@ static struct tag *die__create_new_inline_expansion(Dwarf_Die *die,
 						    struct lexblock *lexblock,
 						    struct cu *cu, struct conf_load *conf);
 
-static int die__process_inline_expansion(Dwarf_Die *die, struct lexblock *lexblock, struct cu *cu, struct conf_load *conf)
+static int die__process_inline_expansion(Dwarf_Die *die,
+					  struct inline_expansion *exp, struct lexblock *lexblock,
+					  struct cu *cu, struct conf_load *conf)
 {
 	Dwarf_Die child;
 	struct tag *tag;
+	int parm_idx = 0;
 
 	if (!dwarf_haschildren(die) || dwarf_child(die, &child) != 0)
 		return 0;
@@ -2179,6 +2190,7 @@ static int die__process_inline_expansion(Dwarf_Die *die, struct lexblock *lexblo
 			 *
 			 * cu__tag_not_handled(cu, die);
 			 */
+			tag = die__create_new_parameter(die, NULL, lexblock, exp, cu, conf, parm_idx++);
 			continue;
 		case DW_TAG_inlined_subroutine:
 			tag = die__create_new_inline_expansion(die, lexblock, cu, conf);
@@ -2230,7 +2242,7 @@ static struct tag *die__create_new_inline_expansion(Dwarf_Die *die,
 	if (exp == NULL)
 		return NULL;
 
-	if (die__process_inline_expansion(die, lexblock, cu, conf) != 0) {
+	if (die__process_inline_expansion(die, exp, lexblock, cu, conf) != 0) {
 		tag__free(&exp->ip.tag, cu);
 		return NULL;
 	}
@@ -2315,7 +2327,7 @@ static int die__process_function(Dwarf_Die *die, struct ftype *ftype,
 			continue;
 		}
 		case DW_TAG_formal_parameter:
-			tag = die__create_new_parameter(die, ftype, lexblock, cu, conf, param_idx++);
+			tag = die__create_new_parameter(die, ftype, lexblock, NULL, cu, conf, param_idx++);
 			break;
 		case DW_TAG_variable:
 			tag = die__create_new_variable(die, cu, conf, 0);
@@ -2607,54 +2619,87 @@ static void __tag__print_abstract_origin_not_found(struct tag *tag,
 #define tag__print_abstract_origin_not_found(tag) \
 	__tag__print_abstract_origin_not_found(tag, __func__, __LINE__)
 
+static void parameter__recode_dwarf_type(struct parameter *parm, struct cu *cu)
+{
+	struct dwarf_cu *dcu = cu->priv;
+	struct dwarf_tag *dparm = tag__dwarf(&parm->tag);
+
+	if (dparm->type == 0) {
+		if (dparm->abstract_origin == 0) {
+			/* Function without parameters */
+			parm->tag.type = 0;
+			return;
+		}
+		// FIXME: Should this use find_type_by_ref instead?
+		struct dwarf_tag *dtype = dwarf_cu__find_tag_by_ref(dcu, dparm, abstract_origin);
+		if (dtype == NULL) {
+			tag__print_abstract_origin_not_found(&parm->tag);
+			return;
+		}
+		struct parameter *oparm = tag__parameter(dtag__tag(dtype));
+		parm->name = oparm->name;
+		parm->tag.type = dtag__tag(dtype)->type;
+		/* Share location information between parameter and abstract origin;
+		 * if neither have location, we will mark the parameter as optimized out.
+		 * Also share info regarding unexpected register use for parameters.
+		 */
+		if (parm->has_loc)
+			oparm->has_loc = parm->has_loc;
+
+		if (parm->optimized)
+			oparm->optimized = parm->optimized;
+		if (parm->unexpected_reg)
+			oparm->unexpected_reg = parm->unexpected_reg;
+		return;
+	}
+
+	struct dwarf_tag *dtype = dwarf_cu__find_type_by_ref(dcu, dparm, type);
+	if (dtype == NULL) {
+		tag__print_type_not_found(&parm->tag);
+		return;
+	}
+	parm->tag.type = dtype->small_id;
+}
+
 static void ftype__recode_dwarf_types(struct tag *tag, struct cu *cu)
 {
 	struct parameter *pos;
-	struct dwarf_cu *dcu = cu->priv;
 	struct ftype *type = tag__ftype(tag);
 
-	ftype__for_each_parameter(type, pos) {
-		struct dwarf_tag *dpos = tag__dwarf(&pos->tag);
-		struct parameter *opos;
-		struct dwarf_tag *dtype;
+	ftype__for_each_parameter(type, pos)
+		parameter__recode_dwarf_type(pos, cu);
+}
 
-		if (dpos->type == 0) {
-			if (dpos->abstract_origin == 0) {
-				/* Function without parameters */
-				pos->tag.type = 0;
-				continue;
-			}
-			dtype = dwarf_cu__find_tag_by_ref(dcu, dpos, abstract_origin);
-			if (dtype == NULL) {
-				tag__print_abstract_origin_not_found(&pos->tag);
-				continue;
-			}
-			opos = tag__parameter(dtag__tag(dtype));
-			pos->name = opos->name;
-			pos->tag.type = dtag__tag(dtype)->type;
-			/* share location information between parameter and
-			 * abstract origin; if neither have location, we will
-			 * mark the parameter as optimized out.  Also share
-			 * info regarding unexpected register use for
-			 * parameters.
-			 */
-			if (pos->has_loc)
-				opos->has_loc = pos->has_loc;
+static void inline_expansion__recode_dwarf_types(struct tag *tag, struct cu *cu)
+{
+	struct dwarf_cu *dcu = cu->priv;
+	struct dwarf_tag *dtag = tag__dwarf(tag);
 
-			if (pos->optimized)
-				opos->optimized = pos->optimized;
-			if (pos->unexpected_reg)
-				opos->unexpected_reg = pos->unexpected_reg;
-			continue;
-		}
-
-		dtype = dwarf_cu__find_type_by_ref(dcu, dpos, type);
-		if (dtype == NULL) {
-			tag__print_type_not_found(&pos->tag);
-			continue;
-		}
-		pos->tag.type = dtype->small_id;
+	/* DW_TAG_inlined_subroutine is an special case as dwarf_tag->id is
+	 * in fact an abtract origin, i.e. must be looked up in the tags_table,
+	 * not in the types_table.
+	 */
+	struct dwarf_tag *ftype = NULL;
+	if (dtag->type != 0)
+		ftype = dwarf_cu__find_tag_by_ref(dcu, dtag, type);
+	else
+		ftype = dwarf_cu__find_tag_by_ref(dcu, dtag, abstract_origin);
+	if (ftype == NULL) {
+		if (dtag->type != 0)
+			tag__print_type_not_found(tag);
+		else
+			tag__print_abstract_origin_not_found(tag);
+		return;
 	}
+
+	// TODO: Is ftype a prototype or a function?
+	ftype__recode_dwarf_types(dtag__tag(ftype), cu);
+
+	struct tag *pos;
+	struct inline_expansion *exp = tag__inline_expansion(tag);
+	list_for_each_entry(pos, &exp->parms, node)
+		parameter__recode_dwarf_type(tag__parameter(pos), cu);
+	exp->ip.tag.type = ftype->small_id;
 }
 
 static void lexblock__recode_dwarf_types(struct lexblock *tag, struct cu *cu)
@@ -2671,18 +2716,7 @@ static void lexblock__recode_dwarf_types(struct lexblock *tag, struct cu *cu)
 			lexblock__recode_dwarf_types(tag__lexblock(pos), cu);
 			continue;
 		case DW_TAG_inlined_subroutine:
-			if (dpos->type != 0)
-				dtype = dwarf_cu__find_tag_by_ref(dcu, dpos, type);
-			else
-				dtype = dwarf_cu__find_tag_by_ref(dcu, dpos, abstract_origin);
-			if (dtype == NULL) {
-				if (dpos->type != 0)
-					tag__print_type_not_found(pos);
-				else
-					tag__print_abstract_origin_not_found(pos);
-				continue;
-			}
-			ftype__recode_dwarf_types(dtag__tag(dtype), cu);
+			inline_expansion__recode_dwarf_types(pos, cu);
 			continue;
 
 		case DW_TAG_formal_parameter:
@@ -2862,12 +2896,11 @@ static int tag__recode_dwarf_type(struct tag *tag, struct cu *cu)
 
 	case DW_TAG_namespace:
 		return namespace__recode_dwarf_types(tag, cu);
-	/* Damn, DW_TAG_inlined_subroutine is an special case
-           as dwarf_tag->id is in fact an abtract origin, i.e. must be
-	   looked up in the tags_table, not in the types_table.
-	   The others also point to routines, so are in tags_table */
 	case DW_TAG_inlined_subroutine:
+		inline_expansion__recode_dwarf_types(tag, cu);
+		return 0;
 	case DW_TAG_imported_module:
+	  /* Modules point to routines, so are in tags_table */
 		dtype = dwarf_cu__find_tag_by_ref(cu->priv, dtag, type);
 		goto check_type;
 	/* Can be for both types and non types */
