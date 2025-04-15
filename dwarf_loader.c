@@ -1376,6 +1376,15 @@ static struct inline_expansion *inline_expansion__new(Dwarf_Die *die, struct cu 
 		dtag->decl_file = attr_string(die, DW_AT_call_file, conf);
 		dtag->decl_line = attr_numeric(die, DW_AT_call_line);
 		dwarf_tag__set_attr_type(dtag, type, die, DW_AT_abstract_origin);
+
+		Dwarf_Attribute attr_orig;
+		if (dwarf_attr(die, DW_AT_abstract_origin, &attr_orig)) {
+			Dwarf_Die die_orig;
+			if (dwarf_formref_die(&attr_orig, &die_orig)) {
+				exp->name = attr_string(&die_orig, DW_AT_name, conf);
+			}
+		}
+
 		exp->ip.addr = 0;
 		exp->high_pc = 0;
 		exp->nr_parms = 0;

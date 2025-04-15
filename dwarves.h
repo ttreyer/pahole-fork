@@ -809,6 +809,7 @@ struct ip_tag {
 
 struct inline_expansion {
 	struct ip_tag	 ip;
+	const char *name;
 	size_t		 size;
 	uint64_t	 high_pc;
 	struct list_head parms;
