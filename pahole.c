@@ -28,12 +28,15 @@
 #include "dutil.h"
 //#include "ctf_encoder.h" FIXME: disabled, probably its better to move to Oracle's libctf
 #include "btf_encoder.h"
+#include "inline_encoder.h"
 
 static struct btf_encoder *btf_encoder;
+static struct inline_encoder *inline_encoder;
 static char *detached_btf_filename;
 struct cus *cus;
 static bool btf_encode;
 static bool ctf_encode;
+static bool inline_encode;
 static bool sort_output;
 static bool need_resort;
 static bool first_obj_only;
@@ -1639,6 +1642,11 @@ static const struct argp_option pahole__options[] = {
 		.doc  = "Encode as BTF",
 	},
 	{
+		.name = "inline_encode",
+		.key  = 'L',
+		.doc  = "Encode inline expansions into .BTF.inline section",
+	},
+	{
 		.name = "btf_encode_detached",
 		.key  = ARGP_btf_encode_detached,
 		.arg  = "FILENAME",
@@ -1832,6 +1840,7 @@ static error_t pahole__options_parser(int key, char *arg,
 							break;
 	case ARGP_btf_encode_detached:
 		  detached_btf_filename = arg; // fallthru
+	case 'L': inline_encode = inline_encode || key == 'L'; // fallthru
 	case 'J': btf_encode = 1;
 		  conf_load.get_addr_info = true;
 		  conf_load.ignore_alignment_attr = true;
@@ -3140,6 +3149,22 @@ static enum load_steal_kind pahole_stealer__btf_encode(struct cu *cu, struct con
 		return LSK__STOP_LOADING;
 	}
 
+	if (inline_encode) {
+		if (!inline_encoder)
+			inline_encoder = inline_encoder__new(cu, detached_btf_filename, conf_load->base_btf, global_verbose, conf_load);
+
+		if (!inline_encoder) {
+			fprintf(stderr, "Error creating inline encoder.\n");
+			return LSK__STOP_LOADING;
+		}
+
+		err = inline_encoder__encode_cu(inline_encoder, cu, conf_load);
+		if (err < 0) {
+			fprintf(stderr, "Error while encoding BTF.inline.\n");
+			return LSK__STOP_LOADING;
+		}
+	}
+
 	return LSK__DELETE;
 }
 
@@ -3672,10 +3697,19 @@ try_sole_arg_as_class_names:
 
 	if (btf_encode && btf_encoder) { // maybe all CUs were filtered out and thus we don't have an encoder?
 		err = btf_encoder__encode(btf_encoder, &conf_load);
-		btf_encoder__delete(btf_encoder);
 		if (err) {
 			fputs("Failed to encode BTF\n", stderr);
-			goto out_cus_delete;
+			goto out_btf_encoder_delete;
+		}
+
+		if (inline_encode && inline_encoder) {
+			inline_encoder__set_btf(inline_encoder, btf_encoder__btf(btf_encoder));
+			err = inline_encoder__encode(inline_encoder, &conf_load);
+			inline_encoder__delete(inline_encoder);
+			if (err) {
+				fputs("Failed to encode BTF.inline\n", stderr);
+				goto out_btf_encoder_delete;
+			}
 		}
 	}
 out_ok:
@@ -3683,6 +3717,8 @@ out_ok:
 		print_stats();
 
 	rc = EXIT_SUCCESS;
+out_btf_encoder_delete:
+	btf_encoder__delete(btf_encoder);
 out_cus_delete:
 #ifdef DEBUG_CHECK_LEAKS
 	cus__delete(cus);

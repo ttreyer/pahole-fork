@@ -29,4 +29,6 @@ void btf_encoder__delete(struct btf_encoder *encoder);
 int btf_encoder__encode(struct btf_encoder *encoder, struct conf_load *conf);
 int btf_encoder__encode_cu(struct btf_encoder *encoder, struct cu *cu, struct conf_load *conf_load);
 
+struct btf *btf_encoder__btf(struct btf_encoder *encoder);
+
 #endif /* _BTF_ENCODER_H_ */
