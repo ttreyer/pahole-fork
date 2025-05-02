@@ -24,7 +24,7 @@
 #include <pthread.h>
 
 enum loc_type {
-	LOC_END_OF_EXPR,
+	LOC_NIL = 0,
 	LOC_SIGNED_CONST_1,
 	LOC_SIGNED_CONST_2,
 	LOC_SIGNED_CONST_4,
@@ -34,11 +34,12 @@ enum loc_type {
 	LOC_UNSIGNED_CONST_4,
 	LOC_UNSIGNED_CONST_8,
 	LOC_REGISTER,
+	LOC_ADDR_REGISTER_OFFSET,
 } __attribute__((packed));
 
 struct loc {
 	enum loc_type type;
-	uint8_t size;
+	// operands[...]
 };
 
 struct inline_parameter {
@@ -125,12 +126,44 @@ static size_t inline_instance__sizeof(uint16_t param_count)
 	return offsetof(struct inline_instance, parameters) + param_count * sizeof(struct inline_parameter);
 }
 
+static size_t loc__sizeof(enum loc_type type)
+{
+	size_t operands_size = 0;
+	switch (type) {
+		case LOC_NIL:
+			operands_size = 0;
+			break;
+		case LOC_SIGNED_CONST_1:
+		case LOC_UNSIGNED_CONST_1:
+			operands_size = 1;
+			break;
+		case LOC_SIGNED_CONST_2:
+		case LOC_UNSIGNED_CONST_2:
+			operands_size = 2;
+			break;
+		case LOC_SIGNED_CONST_4:
+		case LOC_UNSIGNED_CONST_4:
+			operands_size = 4;
+			break;
+		case LOC_SIGNED_CONST_8:
+		case LOC_UNSIGNED_CONST_8:
+			operands_size = 8;
+			break;
+		case LOC_REGISTER:
+			operands_size = 1;
+			break;
+		case LOC_ADDR_REGISTER_OFFSET:
+			operands_size = 5;
+			break;
+	}
+	return sizeof(struct loc) + operands_size;
+}
+
 static struct loc *loc__make_const(bool is_signed, size_t size, uint64_t value)
 {
 	struct loc *new_loc = zalloc(sizeof(*new_loc) + size);
 	if (new_loc == NULL)
 		return NULL;
-	new_loc->size = sizeof(struct loc) + size;
 	switch (size) {
 		case 1:
 			new_loc->type = is_signed ? LOC_SIGNED_CONST_1 : LOC_UNSIGNED_CONST_1;
@@ -148,32 +181,32 @@ static struct loc *loc__make_const(bool is_signed, size_t size, uint64_t value)
 			free(new_loc);
 			return NULL;
 	}
-	uint8_t *data = (uint8_t *)new_loc + sizeof(struct loc);
-	memcpy(data, &value, size);
+	uint8_t *operands = (uint8_t *)new_loc + sizeof(*new_loc);
+	memcpy(operands, &value, size);
 	return new_loc;
 }
 
-static struct loc *loc__make_register(uint8_t reg, int64_t offset)
+static struct loc *loc__make_register(uint8_t reg)
 {
-	struct loc *new_loc = zalloc(sizeof(*new_loc) + sizeof(reg) + sizeof(offset));
+	struct loc *new_loc = zalloc(loc__sizeof(LOC_REGISTER));
 	if (new_loc == NULL)
 		return NULL;
-	new_loc->size = sizeof(struct loc) + sizeof(uint8_t) + sizeof(int64_t);
 	new_loc->type = LOC_REGISTER;
-	uint8_t *data = (uint8_t *)new_loc + sizeof(struct loc);
-	*data = reg;
-	data += sizeof(uint8_t);
-	memcpy(data, &offset, sizeof(int64_t));
+	uint8_t *operands = (uint8_t *)new_loc + sizeof(*new_loc);
+	memcpy(operands, &reg, sizeof(reg));
 	return new_loc;
 }
 
-static struct loc *loc__make_eoe(void)
+static struct loc *loc__make_addr_register_offset(uint8_t reg, int32_t offset)
 {
-	struct loc *new_loc = zalloc(sizeof(*new_loc));
+	struct loc *new_loc = zalloc(loc__sizeof(LOC_ADDR_REGISTER_OFFSET));
 	if (new_loc == NULL)
 		return NULL;
-	new_loc->type = LOC_END_OF_EXPR;
-	new_loc->size = sizeof(*new_loc);
+	new_loc->type = LOC_ADDR_REGISTER_OFFSET;
+	uint8_t *operands = (uint8_t *)new_loc + sizeof(*new_loc);
+	memcpy(operands, &reg, sizeof(reg));
+	operands += sizeof(reg);
+	memcpy(operands, &offset, sizeof(offset));
 	return new_loc;
 }
 
@@ -183,7 +216,7 @@ static uint32_t expr__size(struct loc *expr[16])
 	for (size_t i = 0; i < 16; ++i) {
 		if (expr[i] == NULL)
 			break;
-		size += expr[i]->size;
+		size += loc__sizeof(expr[i]->type);
 	}
 	return size;
 }
@@ -226,10 +259,10 @@ static int inline_encoder__encode_location(struct inline_encoder *encoder, struc
 				expr[expr_i++] = loc__make_const(false, 1, op.atom - DW_OP_lit0);
 				break;
 			case DW_OP_reg0 ... DW_OP_reg31:
-				expr[expr_i++] = loc__make_register(op.atom - DW_OP_reg0, 0);
+				expr[expr_i++] = loc__make_register(op.atom - DW_OP_reg0);
 				break;
 			case DW_OP_breg0 ... DW_OP_breg31: {
-				expr[expr_i++] = loc__make_register(op.atom - DW_OP_breg0, op.number);
+				expr[expr_i++] = loc__make_addr_register_offset(op.atom - DW_OP_breg0, op.number);
 				break;
 			}
 			case DW_OP_stack_value: {
@@ -239,11 +272,10 @@ static int inline_encoder__encode_location(struct inline_encoder *encoder, struc
 			default:
 				goto out_err;
 		}
-		if (expr_i >= 16)
+		if (expr_i > 1)
 			goto out_err;
 	}
 
-	expr[expr_i++] = loc__make_eoe();
 	return 0;
 
 out_err:
@@ -388,10 +420,10 @@ static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const 
 		.version = 1,
 		.flags = 0,
 		.header_size = sizeof(header),
-		.inline_info_offset = sizeof(struct inline_encoder__header),
+		.inline_info_offset = sizeof(header),
 		.inline_info_size = 0,
 		.location_offset = 0,
-		.location_size = 2,
+		.location_size = sizeof(struct loc), // first location is nil [1]
 	};
 	write(fd, &header, header.header_size);
 
@@ -430,11 +462,8 @@ static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const 
 
 	free(type_id_cache);
 
-	struct loc end_of_expr = {
-		.type = LOC_END_OF_EXPR,
-		.size = sizeof(end_of_expr),
-	};
-	write(fd, &end_of_expr, sizeof(end_of_expr));
+	enum loc_type nil = LOC_NIL;
+	write(fd, &nil, sizeof(nil)); // Write first nil location [1]
 	list_for_each_entry(exp, &encoder->inline_instances, node) {
 		if (exp->type_id == -1)
 			continue;
@@ -444,7 +473,7 @@ static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const 
 				struct loc *op = param->location[j];
 				if (op == NULL)
 					break;
-				write(fd, op, op->size);
+				write(fd, op, loc__sizeof(op->type));
 			}
 		}
 	}

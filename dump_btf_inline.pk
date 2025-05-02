@@ -1,0 +1,15 @@
+#!/usr/bin/poke -L
+!#
+
+load btf_inline;
+
+if (!poke_interactive_p) {
+  var target = "/tmp/inline_expansions.btf";
+  if (argv'length == 1) target = argv[0];
+
+  var inline_file = open(target, IOS_M_RDONLY);
+  var inline_info = II @ inline_file : 0#B;
+  for (exp in inline_info.inline_instances) {
+    printf ("{low_pc => '0x%u64x',type_id => %u32d}\n", exp.insn_offset, exp.type_id);
+  }
+}

@@ -3,7 +3,6 @@
 
 type II_location_op = struct {
   uint<8> ty;
-  offset<uint<8>, B> size;
   union {
     byte[0] nil: ty == 0;
     int<8> signed_const_1: ty == 1;
@@ -14,10 +13,11 @@ type II_location_op = struct {
     uint<16> unsigned_const_2: ty == 6;
     uint<32> unsigned_const_4: ty == 7;
     uint<64> unsigned_const_8: ty == 8;
+    uint<8> register: ty == 9;
     struct {
-      uint<8> register;
-      uint<64> offset;
-    } register: ty == 9;
+      uint<8> reg;
+      uint<32> offset;
+    } addr_register_offset: ty == 10;
   } value;
 };
 
@@ -44,12 +44,3 @@ type II = struct {
   II_inline_instance[hdr.inline_info_size] inline_instances @ hdr.inline_info_offset;
   II_location_op[hdr.location_size] locations @ hdr.location_offset;
 };
-
-if (!poke_interactive_p) {
-  var inline_file = open("/tmp/inline_expansions.btf", IOS_M_RDONLY);
-  var inline_info = II @ inline_file : 0#B;
-
-  for (exp in inline_info.inline_instances) {
-    printf ("{low_pc => '0x%u64x',type_id => %u32d}\n", exp.insn_offset, exp.type_id);
-  }
-}
