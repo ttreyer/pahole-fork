@@ -439,7 +439,15 @@ static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const 
 			found->type_id = (type_id < 0) ? -1 : type_id;
 		}
 		exp->type_id = found->type_id;
-		if (exp->type_id == -1) continue;
+		if (exp->type_id == -1) exp->type_id = 0;
+
+		// Skip inline instances with no type information
+		bool is_all_nil = exp->type_id == 0;
+		for (uint16_t i = 0; i < exp->param_count; ++i) {
+			struct inline_parameter *param = &exp->parameters[i];
+			is_all_nil &= !param->location[0] || param->location[0]->type == LOC_NIL;
+		}
+		if (is_all_nil) continue;
 
 		const void *data = exp;
 		header.inline_info_size += write(
