@@ -1827,7 +1827,7 @@ static struct tag *die__create_new_parameter(Dwarf_Die *die,
 	} else if (exp != NULL) {
 		/*
 		 * Inline expansion stores the parameters in a list to emit
-		 * .BTF_inline parameter location.
+		 * .BTF.func_aux parameter location.
 		 */
 		inline_expansion__add_parameter(exp, parm);
 	} else {

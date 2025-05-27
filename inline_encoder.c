@@ -60,6 +60,12 @@ struct inline_instance {
 	struct inline_parameter parameters[];
 };
 
+struct func_aux_header {
+	struct btf_header btf_hdr;
+	uint32_t location_offset;
+	uint32_t location_size;
+};
+
 struct inline_encoder {
 	struct btf *btf;
 	struct cu *cu;
@@ -74,17 +80,6 @@ struct loc_node {
 	struct rb_node rb_node;
 	struct list_head node;
 	struct loc loc;
-};
-
-struct inline_encoder__header {
-	uint16_t magic;
-	uint8_t version;
-	uint8_t flags;
-	uint32_t header_size;
-	uint32_t inline_info_offset;
-	uint32_t inline_info_size;
-	uint32_t location_offset;
-	uint32_t location_size;
 };
 
 struct inline_encoder *inline_encoder__new(struct cu *cu, const char *detached_filename, struct btf *base_btf, bool verbose, struct conf_load *conf_load)
@@ -407,103 +402,6 @@ static struct node_type_id *search_type_id_cache(struct btf *btf, struct node_ty
 	return found;
 }
 
-static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const char *filename)
-{
-	int err = -1;
-
-	int fd = creat(filename, S_IRUSR | S_IWUSR);
-	if (fd == -1) {
-		fprintf(stderr, "%s open(%s) failed!\n", __func__, filename);
-		goto out;
-	}
-
-	struct inline_encoder__header header = {
-		.magic = 0xeb9f,
-		.version = 1,
-		.flags = 0,
-		.header_size = sizeof(header),
-		.inline_info_offset = 0,
-		.inline_info_size = 0,
-		.location_offset = 0,
-		.location_size = sizeof(struct loc), // first location is nil [1]
-	};
-	write(fd, &header, header.header_size);
-
-	struct node_type_id *type_id_cache = build_type_id_cache(encoder);
-
-	struct inline_instance *exp;
-	list_for_each_entry(exp, &encoder->inline_instances, node) {
-		struct node_type_id *found = search_type_id_cache(encoder->btf, type_id_cache, encoder->inline_instance_cnt, exp->name);
-		exp->type_id = found->type_id;
-		if (exp->type_id == -1) exp->type_id = 0;
-
-		// Skip inline instances with no type information
-		bool is_all_nil = exp->type_id == 0;
-		for (uint16_t i = 0; i < exp->param_count; ++i) {
-			struct inline_parameter *param = &exp->parameters[i];
-			is_all_nil &= !param->location || param->location->type == LOC_NIL;
-		}
-		if (is_all_nil) continue;
-
-		const void *data = exp;
-		header.inline_info_size += write(
-			fd,
-			data + offsetof(struct inline_instance, insn_offset),
-			inline_instance__sizeof(0)
-				- offsetof(struct inline_instance, insn_offset)
-				- 2); // Skip padding at the end of the struct
-		for (uint16_t i = 0; i < exp->param_count; ++i) {
-			struct inline_parameter *param = &exp->parameters[i];
-			if (param->location == NULL || param->location->type == LOC_NIL) {
-				uint32_t zero = 0;
-				header.inline_info_size += write(fd, &zero, sizeof(zero));
-			} else {
-				header.inline_info_size += write(fd, &header.location_size, sizeof(header.location_size));
-				header.location_size += loc__sizeof(param->location->type);
-			}
-		}
-	}
-
-	free(type_id_cache);
-
-	enum loc_type nil = LOC_NIL;
-	write(fd, &nil, sizeof(nil)); // Write first nil location [1]
-	list_for_each_entry(exp, &encoder->inline_instances, node) {
-		if (exp->type_id == -1)
-			continue;
-		for (uint16_t i = 0; i < exp->param_count; ++i) {
-			struct loc *op = exp->parameters[i].location;
-			write(fd, op, loc__sizeof(op->type));
-		}
-	}
-	header.location_offset = header.inline_info_offset + header.inline_info_size;
-	lseek(fd, 0, SEEK_SET);
-	write(fd, &header, header.header_size);
-
-	close(fd);
-	return 0;
-
-out:
-	if (fd != - 1)
-		close(fd);
-	unlink(filename);
-	return err;
-}
-
-struct func_aux_header {
-	uint16_t magic;
-	uint8_t version;
-	uint8_t flags;
-	uint32_t header_size;
-
-	uint32_t type_offset;
-	uint32_t type_size;
-	uint32_t string_offset;
-	uint32_t string_size;
-	uint32_t location_offset;
-	uint32_t location_size;
-};
-
 static int btf_encoder__write_raw_file(struct btf *btf, struct gobuffer *params, const char *filename)
 {
 	__u32 raw_btf_size;
@@ -514,9 +412,9 @@ static int btf_encoder__write_raw_file(struct btf *btf, struct gobuffer *params,
 	}
 
 	struct func_aux_header hdr = {};
-	memcpy(&hdr, raw_btf_data, sizeof(hdr));
-	hdr.header_size = sizeof(hdr);
-	hdr.location_offset = hdr.string_offset + hdr.string_size;
+	memcpy(&hdr, raw_btf_data, sizeof(struct btf_header));
+	hdr.btf_hdr.hdr_len = sizeof(hdr);
+	hdr.location_offset = hdr.btf_hdr.str_off + hdr.btf_hdr.str_len;
 	hdr.location_size = gobuffer__size(params);
 
 	int fd = open(filename, O_WRONLY | O_CREAT, 0640);
@@ -541,15 +439,6 @@ static int btf_encoder__write_raw_file(struct btf *btf, struct gobuffer *params,
 
 	close(fd);
 
-	// if ((uint32_t)err != raw_btf_size) {
-	// 	fprintf(stderr, "%s: Could only write %d bytes to %s of raw BTF info out of %d, aborting\n", __func__, err, filename, raw_btf_size);
-	// 	unlink(filename);
-	// 	err = -1;
-	// } else {
-	// 	/* go from bytes written == raw_btf_size to an indication that all went fine */
-	// 	err = 0;
-	// }
-
 	return err;
 }
 
@@ -573,23 +462,18 @@ static int inline_encoder__write_func_aux(struct inline_encoder *encoder, const 
 	struct gobuffer *params = gobuffer__new();
 	struct node_type_id *type_id_cache = build_type_id_cache(encoder);
 
-	uint16_t max_funcsec_vlen = 0xfffc;
-	uint16_t funcsec_vlen = 0xffff;
-
 	size_t exp_count = 0;
 	struct inline_instance *exp;
 	list_for_each_entry(exp, &encoder->inline_instances, node) {
-		if (funcsec_vlen++ == UINT16_MAX) {
+		/* Add new funcsec when previous one reached its capacity. */
+		if ((exp_count & UINT16_MAX) == 0) {
 			int funcsec_id = btf__add_funcsec(func_aux, ".text", 0);
 			if (funcsec_id < 0) {
 				fprintf(stderr, "btf__add_funcsec failed: %d\n", funcsec_id);
 				err = funcsec_id;
 				goto out_free;
 			}
-			funcsec_vlen = 1;
-			if (max_funcsec_vlen < UINT16_MAX)
-				max_funcsec_vlen++;
-			printf("New funcsec id: %d, max vlen bumped to %x\n", funcsec_id, max_funcsec_vlen);
+			printf("New funcsec id: %d\n", funcsec_id);
 		}
 		struct node_type_id *found = search_type_id_cache(encoder->btf, type_id_cache, encoder->inline_instance_cnt, exp->name);
 		exp->type_id = found->type_id;
@@ -598,7 +482,9 @@ static int inline_encoder__write_func_aux(struct inline_encoder *encoder, const 
 		exp_count++;
 		btf__add_funcsec_fn_info(func_aux, exp->type_id, exp->insn_offset, gobuffer__size(params));
 		for (uint16_t i = 0; i < exp->param_count; ++i) {
+			struct loc nil = { LOC_NIL };
 			struct loc *op = exp->parameters[i].location;
+			if (op == NULL) op = &nil;
 			gobuffer__add(params, op, loc__sizeof(op->type));
 		}
 		// const struct btf_type *funcsec = btf__type_by_id(func_aux, 1);
@@ -621,14 +507,9 @@ out:
 int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *conf_load)
 {
 	char tmp_fn[PATH_MAX];
-	snprintf(tmp_fn, sizeof(tmp_fn), "%s.btf_inline", encoder->filename);
-
-	int err = inline_encoder__write_raw_file(encoder, tmp_fn);
-	if (err) return err;
-
 	snprintf(tmp_fn, sizeof(tmp_fn), "%s.func_aux", encoder->filename);
 
-	err = inline_encoder__write_func_aux(encoder, tmp_fn);
+	int err = inline_encoder__write_func_aux(encoder, tmp_fn);
 	if (err) return err;
 
 	const char *llvm_objcopy = getenv("LLVM_OBJCOPY");
@@ -636,10 +517,10 @@ int inline_encoder__encode(struct inline_encoder *encoder, struct conf_load *con
 		llvm_objcopy = "llvm-objcopy";
 
 	char cmd[PATH_MAX * 2];
-	snprintf(cmd, sizeof(cmd), "%s --add-section .BTF_inline=%s %s",
+	snprintf(cmd, sizeof(cmd), "%s --add-section .BTF.func_aux=%s %s",
 		 llvm_objcopy, tmp_fn, encoder->filename);
 	if (system(cmd)) {
-		fprintf(stderr, "%s: failed to add .BTF_inline section '%s': %d!\n",
+		fprintf(stderr, "%s: failed to add .BTF.func_aux section '%s': %d!\n",
 				__func__, tmp_fn, errno);
 		err = -1;
 		goto unlink;
