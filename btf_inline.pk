@@ -39,6 +39,45 @@ type II_Header = struct {
   offset<uint<32>, B> location_size;
 };
 
+type FA_Header = struct {
+  uint<16> magic == 0xeb9f;
+  uint<8> version;
+  uint<8> flags;
+  uint<32> header_size;
+  offset<uint<32>, B> type_offset;
+  offset<uint<32>, B> type_size;
+  offset<uint<32>, B> string_offset;
+  offset<uint<32>, B> string_size;
+  offset<uint<32>, B> location_offset;
+  offset<uint<32>, B> location_size;
+};
+
+type funcsec_info = struct {
+  uint<32> type_id;
+  uint<32> addr;
+  uint<32> loc_off;
+};
+
+type BTF_Type = struct {
+  offset<uint<32>, B> name_off;
+  uint<1> kind_flag;
+  uint<2> _unused1;
+  uint<5> kind;
+  uint<8> _unused2;
+  uint<16> vlen;
+  uint<32> size;
+
+  union {
+    funcsec_info[vlen] funcsec: kind == 20;
+    byte[0] _unused3: kind != 20;
+  };
+};
+
+type FA = struct {
+  FA_Header hdr;
+
+};
+
 type II = struct {
   II_Header hdr;
   II_inline_instance[hdr.inline_info_size] inline_instances @ hdr.inline_info_offset;
