@@ -47,7 +47,7 @@ struct loc {
 };
 
 struct inline_parameter {
-	struct loc *location[16];
+	struct loc *location;
 };
 
 struct inline_instance {
@@ -117,8 +117,7 @@ void inline_encoder__delete(struct inline_encoder *encoder)
 	list_for_each_entry_safe_reverse(exp, n, &encoder->inline_instances, node) {
 		list_del_init(&exp->node);
 		for (size_t i = 0; i < exp->param_count; ++i)
-			for (size_t j = 0; j < 16; ++j)
-				free(exp->parameters[i].location[j]);
+			free(exp->parameters[i].location);
 		free(exp);
 	}
 
@@ -214,26 +213,16 @@ static struct loc *loc__make_addr_register_offset(uint8_t reg, int32_t offset)
 	return new_loc;
 }
 
-static uint32_t expr__size(struct loc *expr[16])
-{
-	uint32_t size = 0;
-	for (size_t i = 0; i < 16; ++i) {
-		if (expr[i] == NULL)
-			break;
-		size += loc__sizeof(expr[i]->type);
-	}
-	return size;
-}
-
-static int inline_encoder__encode_location(struct inline_encoder *encoder, struct location *loc, struct loc *expr[16])
+static struct loc *inline_encoder__encode_location(struct inline_encoder *encoder, struct location *loc)
 {
 	if (loc->expr == NULL && loc->exprlen == 0)
-		return 0;
+		return NULL;
 
 	if (loc->expr == NULL) {
-		expr[0] = loc__make_const(false, 8, loc->exprlen);
-		return 0;
+		return loc__make_const(false, 8, loc->exprlen);
 	}
+
+	struct loc *expr[16] = {};
 
 	size_t expr_i = 0;
 	for (size_t i = 0; i < loc->exprlen; ++i) {
@@ -280,15 +269,13 @@ static int inline_encoder__encode_location(struct inline_encoder *encoder, struc
 			goto out_err;
 	}
 
-	return 0;
+	return expr[0];
 
 out_err:
-	for (size_t i = 0; i < expr_i; ++i) {
+	for (size_t i = 0; i < expr_i; ++i)
 		free(expr[i]);
-		expr[i] = NULL;
-	}
 
-	return -1;
+	return NULL;
 }
 
 static inline struct dwarf_tag *tag__dwarf(const struct tag *tag)
@@ -323,9 +310,8 @@ static int inline_encoder__save_inline_expansion(struct inline_encoder *encoder,
 
 	uint32_t param_index = 0;
 	struct parameter *param = NULL;
-	list_for_each_entry(param, &exp->parms, tag.node) {
-		inline_encoder__encode_location(encoder, &param->location, instance->parameters[param_index++].location);
-	}
+	list_for_each_entry(param, &exp->parms, tag.node)
+		instance->parameters[param_index++].location = inline_encoder__encode_location(encoder, &param->location);
 
 	INIT_LIST_HEAD(&instance->node);
 	list_add_tail(&instance->node, &encoder->inline_instances);
@@ -455,7 +441,7 @@ static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const 
 		bool is_all_nil = exp->type_id == 0;
 		for (uint16_t i = 0; i < exp->param_count; ++i) {
 			struct inline_parameter *param = &exp->parameters[i];
-			is_all_nil &= !param->location[0] || param->location[0]->type == LOC_NIL;
+			is_all_nil &= !param->location || param->location->type == LOC_NIL;
 		}
 		if (is_all_nil) continue;
 
@@ -468,12 +454,12 @@ static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const 
 				- 2); // Skip padding at the end of the struct
 		for (uint16_t i = 0; i < exp->param_count; ++i) {
 			struct inline_parameter *param = &exp->parameters[i];
-			if (param->location[0] == NULL) {
+			if (param->location == NULL || param->location->type == LOC_NIL) {
 				uint32_t zero = 0;
 				header.inline_info_size += write(fd, &zero, sizeof(zero));
 			} else {
 				header.inline_info_size += write(fd, &header.location_size, sizeof(header.location_size));
-				header.location_size += expr__size(param->location);
+				header.location_size += loc__sizeof(param->location->type);
 			}
 		}
 	}
@@ -486,13 +472,8 @@ static int inline_encoder__write_raw_file(struct inline_encoder *encoder, const 
 		if (exp->type_id == -1)
 			continue;
 		for (uint16_t i = 0; i < exp->param_count; ++i) {
-			struct inline_parameter *param = &exp->parameters[i];
-			for (size_t j = 0; j < 16; ++j) {
-				struct loc *op = param->location[j];
-				if (op == NULL)
-					break;
-				write(fd, op, loc__sizeof(op->type));
-			}
+			struct loc *op = exp->parameters[i].location;
+			write(fd, op, loc__sizeof(op->type));
 		}
 	}
 	header.location_offset = header.inline_info_offset + header.inline_info_size;
@@ -612,18 +593,13 @@ static int inline_encoder__write_func_aux(struct inline_encoder *encoder, const 
 		}
 		struct node_type_id *found = search_type_id_cache(encoder->btf, type_id_cache, encoder->inline_instance_cnt, exp->name);
 		exp->type_id = found->type_id;
-		if (exp->type_id == -1) exp->type_id = 0;
+		if (exp->type_id == -1) continue; //exp->type_id = 0;
 
 		exp_count++;
 		btf__add_funcsec_fn_info(func_aux, exp->type_id, exp->insn_offset, gobuffer__size(params));
 		for (uint16_t i = 0; i < exp->param_count; ++i) {
-			struct inline_parameter *param = &exp->parameters[i];
-			for (size_t j = 0; j < 16; ++j) {
-				struct loc *op = param->location[j];
-				if (op == NULL)
-					break;
-				gobuffer__add(params, op, loc__sizeof(op->type));
-			}
+			struct loc *op = exp->parameters[i].location;
+			gobuffer__add(params, op, loc__sizeof(op->type));
 		}
 		// const struct btf_type *funcsec = btf__type_by_id(func_aux, 1);
 		// printf("funcsec count=%4x, funcsec vlen=%4x\n", funcsec_vlen, btf_vlen(funcsec));
